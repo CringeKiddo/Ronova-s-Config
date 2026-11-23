@@ -29,6 +29,7 @@ import com.ronova.config.engine.EngineHooks
 import com.ronova.config.engine.HotReloadDiffController
 import com.ronova.config.engine.OptimizationEngine
 import com.ronova.config.engine.StepOutcome
+import com.ronova.config.engine.ThermalMonitor
 import com.ronova.config.overlay.ZeroLagFpsOverlay
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -85,6 +86,7 @@ class LatencyGuardService : VpnService(), EngineHooks {
     private lateinit var engine: OptimizationEngine
     private lateinit var diff: HotReloadDiffController
     private lateinit var fpsOverlay: ZeroLagFpsOverlay
+    private lateinit var thermalMonitor: ThermalMonitor
     private lateinit var nm: NotificationManager
 
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -110,6 +112,7 @@ class LatencyGuardService : VpnService(), EngineHooks {
         engine.hooks = this
         diff = HotReloadDiffController(engine)
         fpsOverlay = ZeroLagFpsOverlay(this, adb, scope)
+        thermalMonitor = ThermalMonitor(this)
         nm = getSystemService(NotificationManager::class.java)
         ensureChannel()
     }
@@ -142,6 +145,7 @@ class LatencyGuardService : VpnService(), EngineHooks {
         maintenanceJob?.cancel()
         closeVpn()
         fpsOverlay.detachNow()
+        thermalMonitor.stop()
         if (engine.hooks === this) engine.hooks = null
         scope.cancel()
         super.onDestroy()
@@ -287,6 +291,7 @@ class LatencyGuardService : VpnService(), EngineHooks {
             EngineRuntime.set(EngineRuntimeState.Active)
             if (active.networkShield.enabled && active.networkShield.vpnPacketSinkhole) setVpn(active, true)
             if (active.fpsOverlay.enabled) setFpsOverlay(active, true)
+            if (active.thermalGuard.enabled) setThermalGuard(active, true)
             engine.reacquireLocks(active)
             startMaintenance()
             refreshNotification()
@@ -300,7 +305,7 @@ class LatencyGuardService : VpnService(), EngineHooks {
             while (isActive) {
                 delay(15_000L)
                 val cfg = cachedActive ?: continue
-                engine.refreshLmkdLock(cfg)
+                engine.refreshActiveBucket(cfg)
                 engine.refreshWarnings(cfg)
                 val now = engine.warnings.value
                 if (now != lastWarnings) {
@@ -373,6 +378,15 @@ class LatencyGuardService : VpnService(), EngineHooks {
         }
         val ok = fpsOverlay.start(config.targetPackage, config.fpsOverlay.refreshIntervalMs)
         return StepOutcome(ok, "fps:start", if (ok) "FPS counter running" else "Could not start the overlay")
+    }
+
+    override suspend fun setThermalGuard(config: ConfigState, enabled: Boolean): StepOutcome {
+        if (!enabled || !config.thermalGuard.warnOnThrottling) {
+            thermalMonitor.stop()
+            return StepOutcome(true, "thermal:stop", "Thermal monitor stopped")
+        }
+        thermalMonitor.start()
+        return StepOutcome(true, "thermal:start", "Thermal headroom monitor running (PowerManager, no ADB)")
     }
 
     private fun closeVpn() {
@@ -462,7 +476,7 @@ class LatencyGuardService : VpnService(), EngineHooks {
             }
             is EngineRuntimeState.Active -> {
                 title = "Ronova's Config - ACTIVE"
-                val warning = engine.warnings.value.firstOrNull()
+                val warning = engine.warnings.value.firstOrNull() ?: thermalMonitor.warning.value
                 val modules = ModuleId.entries
                     .filter { (active ?: pending).isModuleEnabled(it) }
                     .joinToString(" - ") { it.shortName }
