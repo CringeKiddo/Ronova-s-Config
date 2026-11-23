@@ -1,0 +1,6 @@
+-keep class org.conscrypt.** { *; }
+-dontwarn org.conscrypt.**
+-keep class org.bouncycastle.** { *; }
+-dontwarn org.bouncycastle.**
+-keep class com.ronova.config.** { *; }
+-dontwarn javax.annotation.**
