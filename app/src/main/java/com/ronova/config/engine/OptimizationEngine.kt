@@ -41,6 +41,7 @@ data class ApplyReport(
 interface EngineHooks {
     suspend fun setVpn(config: ConfigState, enabled: Boolean): StepOutcome
     suspend fun setFpsOverlay(config: ConfigState, enabled: Boolean): StepOutcome
+    suspend fun setThermalGuard(config: ConfigState, enabled: Boolean): StepOutcome
 }
 
 internal class StepDef(
@@ -84,6 +85,22 @@ class OptimizationEngine private constructor(context: Context) {
     private var dnsSaved = false
     private var savedDnsMode = "opportunistic"
     private var savedDnsSpecifier = ""
+
+    private var phantomKillerSaved = false
+    private var savedMaxPhantomProcesses = "32"
+    private var savedPhantomMonitorEnabled = "true"
+
+    private var longPressSaved = false
+    private var savedLongPressTimeout = "400"
+
+    private var animationsSaved = false
+    private var savedWindowAnimScale = "1.0"
+    private var savedTransitionAnimScale = "1.0"
+    private var savedAnimatorDurationScale = "1.0"
+
+    private var refreshRateSaved = false
+    private var savedMinRefreshRate = ""
+    private var savedPeakRefreshRate = ""
 
     // ───────────────────────── Shell helpers ─────────────────────────
 
@@ -197,17 +214,119 @@ class OptimizationEngine private constructor(context: Context) {
         return StepOutcome(ok, "overlay disable + settings put + wm overscan reset", text)
     }
 
-    private fun lmkdCommand(score: Int, pkg: String): String {
-        val patterns = listOf(pkg, "com.google.android.webview", "com.android.webview").distinct()
-        val pgreps = patterns.joinToString("; ") { "pgrep -f '$it'" }
-        return "for p in \$( ($pgreps) | sort -u ); do (choom -n $score -p \$p || echo $score > /proc/\$p/oom_score_adj) 2>&1; done; echo checked"
+    // am set-standby-bucket is a documented, non-root ADB command (unlike writing /proc/<pid>/oom_score_adj,
+    // which needs root and was the old implementation here). It keeps the target app out of the restricted
+    // standby buckets so its jobs/alarms/network aren't throttled if it's briefly backgrounded.
+    private suspend fun applyActiveBucket(c: ConfigState): StepOutcome =
+        sh("am set-standby-bucket ${c.targetPackage} active")
+
+    private suspend fun revertActiveBucket(): StepOutcome = noop("Standby bucket left as-is; Android will re-bucket naturally")
+
+    /** Re-asserted periodically: the OS can re-evaluate the bucket on its own schedule. */
+    suspend fun refreshActiveBucket(config: ConfigState) {
+        if (config.cutoutCrashGuard.enabled && config.cutoutCrashGuard.keepTargetAppActive) {
+            sh("am set-standby-bucket ${config.targetPackage} active")
+        }
     }
 
-    /** Re-run by the service every few seconds because the game/WebView PIDs change over time. */
-    suspend fun refreshLmkdLock(config: ConfigState) {
-        if (config.cutoutCrashGuard.enabled && config.cutoutCrashGuard.protectWebViewLmkd) {
-            sh(lmkdCommand(-900, config.targetPackage))
+    // Android 12+'s phantom-process killer caps background child/renderer processes (32 by default,
+    // shared across all apps) and kills the newest ones over that cap. GeForce NOW's WebView-backed
+    // surfaces are exactly the kind of child process this targets, which is a plausible contributor to
+    // the cutout/black-screen symptom. device_config + this settings key are writable from a plain
+    // (non-root) ADB shell; confirmed against public non-root wireless-debugging guides.
+    private suspend fun applyPhantomKillerDisable(): StepOutcome {
+        if (!phantomKillerSaved) {
+            val cur = sh("device_config get activity_manager max_phantom_processes").output.trim()
+            savedMaxPhantomProcesses = cur.ifBlank { "32" }.let { if (it == "null") "32" else it }
+            val mon = sh("settings get global settings_enable_monitor_phantom_procs").output.trim()
+            savedPhantomMonitorEnabled = mon.ifBlank { "true" }.let { if (it == "null") "true" else it }
+            phantomKillerSaved = true
         }
+        return seq(
+            "device_config put activity_manager max_phantom_processes 2147483647",
+            "settings put global settings_enable_monitor_phantom_procs false"
+        )
+    }
+
+    private suspend fun revertPhantomKillerDisable(): StepOutcome {
+        if (!phantomKillerSaved) return noop("Phantom process killer was never changed")
+        val r = seq(
+            "device_config put activity_manager max_phantom_processes $savedMaxPhantomProcesses",
+            "settings put global settings_enable_monitor_phantom_procs $savedPhantomMonitorEnabled"
+        )
+        phantomKillerSaved = false
+        return r
+    }
+
+    // ───────────────────────── Module 7: touch & animation latency ─────────────────────────
+
+    private suspend fun applyLongPressTimeout(): StepOutcome {
+        if (!longPressSaved) {
+            val cur = sh("settings get secure long_press_timeout").output.trim()
+            savedLongPressTimeout = cur.ifBlank { "400" }.let { if (it == "null") "400" else it }
+            longPressSaved = true
+        }
+        return sh("settings put secure long_press_timeout 250")
+    }
+
+    private suspend fun revertLongPressTimeout(): StepOutcome {
+        if (!longPressSaved) return noop("Long-press timeout was never changed")
+        val r = sh("settings put secure long_press_timeout $savedLongPressTimeout")
+        longPressSaved = false
+        return r
+    }
+
+    private suspend fun applyAnimationScales(): StepOutcome {
+        if (!animationsSaved) {
+            savedWindowAnimScale = sh("settings get global window_animation_scale").output.trim().ifBlank { "1.0" }
+            savedTransitionAnimScale = sh("settings get global transition_animation_scale").output.trim().ifBlank { "1.0" }
+            savedAnimatorDurationScale = sh("settings get global animator_duration_scale").output.trim().ifBlank { "1.0" }
+            animationsSaved = true
+        }
+        return seq(
+            "settings put global window_animation_scale 0",
+            "settings put global transition_animation_scale 0",
+            "settings put global animator_duration_scale 0"
+        )
+    }
+
+    private suspend fun revertAnimationScales(): StepOutcome {
+        if (!animationsSaved) return noop("Animation scales were never changed")
+        val r = seq(
+            "settings put global window_animation_scale $savedWindowAnimScale",
+            "settings put global transition_animation_scale $savedTransitionAnimScale",
+            "settings put global animator_duration_scale $savedAnimatorDurationScale"
+        )
+        animationsSaved = false
+        return r
+    }
+
+    // ───────────────────────── Module 8: refresh-rate floor ─────────────────────────
+
+    // Settings.System.min_refresh_rate / peak_refresh_rate (Android 11+) are the actual keys the
+    // compositor's refresh-rate policy reads; this is the key many single-toggle "90Hz/120Hz" OEM
+    // switches sit on top of. Setting a generous floor is safe: the platform clamps to whatever the
+    // panel's supported modes actually allow, it won't crash on an unsupported value.
+    private suspend fun applyRefreshFloor(): StepOutcome {
+        // minSdk is already 30 (Android 11), so these keys are always present on a device this app runs on.
+        if (!refreshRateSaved) {
+            savedMinRefreshRate = sh("settings get system min_refresh_rate").output.trim()
+            savedPeakRefreshRate = sh("settings get system peak_refresh_rate").output.trim()
+            refreshRateSaved = true
+        }
+        return seq(
+            "settings put system min_refresh_rate 120",
+            "settings put system peak_refresh_rate 120"
+        )
+    }
+
+    private suspend fun revertRefreshFloor(): StepOutcome {
+        if (!refreshRateSaved) return noop("Refresh-rate floor was never changed")
+        fun restoreCmd(key: String, saved: String) =
+            if (saved.isBlank() || saved == "null") "settings delete system $key" else "settings put system $key $saved"
+        val r = seq(restoreCmd("min_refresh_rate", savedMinRefreshRate), restoreCmd("peak_refresh_rate", savedPeakRefreshRate))
+        refreshRateSaved = false
+        return r
     }
 
     // ───────────────────────── Module 4: network ─────────────────────────
@@ -326,26 +445,26 @@ class OptimizationEngine private constructor(context: Context) {
             { applyCutoutReset() }, { noop("Cutout repair corrects stuck state; nothing to restore") }
         ),
         StepDef(
-            ModuleId.CUTOUT_CRASH_GUARD, "hwOverlays", "Disabling HW overlays", 500, false,
-            { it.cutoutCrashGuard.enabled && it.cutoutCrashGuard.disableHwOverlays },
-            { "on" },
-            { sh("service call SurfaceFlinger 1008 i32 1") }, { sh("service call SurfaceFlinger 1008 i32 0") }
-        ),
-        StepDef(
             ModuleId.CUTOUT_CRASH_GUARD, "trimCma", "Trimming CMA memory", 4000, false,
             { it.cutoutCrashGuard.enabled && it.cutoutCrashGuard.trimCmaMemory },
             { "on" },
             { seq("pm trim-caches 512M", "am kill-all") }, { noop("Memory trim is one-shot") }
         ),
         StepDef(
-            ModuleId.CUTOUT_CRASH_GUARD, "webviewLmkd", "Locking game + WebView out of LMKD", 800, true,
-            { it.cutoutCrashGuard.enabled && it.cutoutCrashGuard.protectWebViewLmkd },
+            ModuleId.CUTOUT_CRASH_GUARD, "activeBucket", "Keeping the game in the active standby bucket", 400, true,
+            { it.cutoutCrashGuard.enabled && it.cutoutCrashGuard.keepTargetAppActive },
             { it.targetPackage },
-            { sh(lmkdCommand(-900, it.targetPackage)) }, { sh(lmkdCommand(0, it.targetPackage)) }
+            { applyActiveBucket(it) }, { revertActiveBucket() }
+        ),
+        StepDef(
+            ModuleId.CUTOUT_CRASH_GUARD, "phantomKiller", "Disabling the phantom-process killer", 500, false,
+            { it.cutoutCrashGuard.enabled && it.cutoutCrashGuard.disablePhantomProcessKiller },
+            { "on" },
+            { applyPhantomKillerDisable() }, { revertPhantomKillerDisable() }
         ),
         // Module 3
         StepDef(
-            ModuleId.FRAME_PACING, "antiBackpressure", "Stripping VSync back-pressure", 600, false,
+            ModuleId.FRAME_PACING, "antiBackpressure", "Stripping VSync back-pressure (experimental)", 600, false,
             { it.framePacingFix.enabled && it.framePacingFix.antiBackpressure },
             { "on" },
             { seq("setprop debug.sf.latch_unsignaled 1", "setprop debug.sf.disable_backpressure 1") },
@@ -382,8 +501,8 @@ class OptimizationEngine private constructor(context: Context) {
             ModuleId.NETWORK_SHIELD, "scanThrottle", "Overriding Wi-Fi scan throttle", 400, false,
             { it.networkShield.enabled && it.networkShield.disableWifiScanThrottling },
             { "on" },
-            { sh("settings put global wifi_scan_throttle_enabled 0") },
-            { sh("settings put global wifi_scan_throttle_enabled 1") }
+            { seq("settings put global wifi_scan_throttle_enabled 0", "settings put global wifi_scan_always_enabled 0") },
+            { seq("settings put global wifi_scan_throttle_enabled 1", "settings put global wifi_scan_always_enabled 1") }
         ),
         StepDef(
             ModuleId.NETWORK_SHIELD, "dns", "Routing DNS to custom resolver", 600, false,
@@ -407,13 +526,6 @@ class OptimizationEngine private constructor(context: Context) {
             { sh("settings put global ble_scan_always_enabled 1") }
         ),
         StepDef(
-            ModuleId.BLUETOOTH_ISOLATOR, "btPriority", "Boosting Bluetooth daemon priority", 500, false,
-            { it.bluetoothIsolator.enabled && it.bluetoothIsolator.boostBluetoothDaemonPriority },
-            { "on" },
-            { sh("renice -n -20 -p \$(pidof com.android.bluetooth)") },
-            { sh("renice -n 0 -p \$(pidof com.android.bluetooth)") }
-        ),
-        StepDef(
             ModuleId.BLUETOOTH_ISOLATOR, "coexist", "Checking 2.4 GHz coexistence", 200, false,
             { it.bluetoothIsolator.enabled && it.bluetoothIsolator.warnOn24GhzCoexistence },
             { "on" },
@@ -431,6 +543,34 @@ class OptimizationEngine private constructor(context: Context) {
             { it.targetPackage + "|" + it.fpsOverlay.refreshIntervalMs },
             { c -> hooks?.setFpsOverlay(c, true) ?: StepOutcome(false, "fps", "Service hooks not attached") },
             { c -> hooks?.setFpsOverlay(c, false) ?: noop("Service not running") }
+        ),
+        // Module 7
+        StepDef(
+            ModuleId.TOUCH_LATENCY, "longPress", "Shortening long-press timeout", 300, false,
+            { it.touchLatency.enabled && it.touchLatency.reduceLongPressTimeout },
+            { "on" },
+            { applyLongPressTimeout() }, { revertLongPressTimeout() }
+        ),
+        StepDef(
+            ModuleId.TOUCH_LATENCY, "animations", "Zeroing system animation scales", 300, false,
+            { it.touchLatency.enabled && it.touchLatency.disableUiAnimations },
+            { "on" },
+            { applyAnimationScales() }, { revertAnimationScales() }
+        ),
+        // Module 8
+        StepDef(
+            ModuleId.DISPLAY_REFRESH, "refreshFloor", "Raising the refresh-rate floor", 400, false,
+            { it.displayRefresh.enabled && it.displayRefresh.forceMaxRefreshRate },
+            { "on" },
+            { applyRefreshFloor() }, { revertRefreshFloor() }
+        ),
+        // Module 9
+        StepDef(
+            ModuleId.THERMAL_GUARD, "thermal", "Starting thermal-headroom monitor", 300, true,
+            { it.thermalGuard.enabled },
+            { it.thermalGuard.warnOnThrottling.toString() },
+            { c -> hooks?.setThermalGuard(c, true) ?: StepOutcome(false, "thermal", "Service hooks not attached") },
+            { c -> hooks?.setThermalGuard(c, false) ?: noop("Service not running") }
         )
     )
 
