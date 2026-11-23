@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.matchParentSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -450,8 +451,51 @@ fun ModuleGlyph(id: ModuleId, size: Dp, active: Boolean, modifier: Modifier = Mo
         ModuleId.NETWORK_SHIELD -> NetworkShieldIcon(size, active, modifier)
         ModuleId.BLUETOOTH_ISOLATOR -> BluetoothIsolatorIcon(size, active, modifier)
         ModuleId.FPS_OVERLAY -> FpsCounterIcon(size, active, modifier)
+        ModuleId.TOUCH_LATENCY -> TouchLatencyIcon(size, active, modifier)
+        ModuleId.DISPLAY_REFRESH -> RefreshRateIcon(size, active, modifier)
+        ModuleId.THERMAL_GUARD -> ThermalGuardIcon(size, active, modifier)
     }
 }
+
+@Composable
+fun TouchLatencyIcon(size: Dp = 28.dp, active: Boolean = true, modifier: Modifier = Modifier) =
+    IconCanvas(size, active, modifier) { brush, stroke ->
+        val w = this.size.minDimension
+        val c = Offset(w * 0.5f, w * 0.5f)
+        drawCircle(brush, w * 0.07f, c)
+        listOf(0.26f, 0.4f).forEach { rr ->
+            drawCircle(brush, w * rr, c, alpha = 1f - rr, style = Stroke(stroke.width * 0.7f))
+        }
+        sparkle(Offset(w * 0.82f, w * 0.18f), w * 0.09f, w * 0.02f, brush)
+    }
+
+@Composable
+fun RefreshRateIcon(size: Dp = 28.dp, active: Boolean = true, modifier: Modifier = Modifier) =
+    IconCanvas(size, active, modifier) { brush, stroke ->
+        val w = this.size.minDimension
+        val c = Offset(w * 0.5f, w * 0.5f)
+        val r = w * 0.32f
+        drawArc(brush, -40f, 260f, false, Offset(c.x - r, c.y - r), Size(r * 2f, r * 2f), style = stroke)
+        val ah = Math.toRadians(-40.0)
+        val tip = Offset(c.x + (cos(ah) * r).toFloat(), c.y + (sin(ah) * r).toFloat())
+        val arrow = Path()
+        arrow.moveTo(tip.x - w * 0.1f, tip.y - w * 0.03f)
+        arrow.lineTo(tip.x, tip.y)
+        arrow.lineTo(tip.x - w * 0.03f, tip.y + w * 0.1f)
+        drawPath(arrow, brush, style = stroke)
+        sparkle(Offset(w * 0.5f, w * 0.5f), w * 0.08f, w * 0.015f, brush)
+    }
+
+@Composable
+fun ThermalGuardIcon(size: Dp = 28.dp, active: Boolean = true, modifier: Modifier = Modifier) =
+    IconCanvas(size, active, modifier) { brush, stroke ->
+        val w = this.size.minDimension
+        val stemX = w * 0.5f
+        drawLine(brush, Offset(stemX, w * 0.16f), Offset(stemX, w * 0.6f), stroke.width, StrokeCap.Round)
+        drawCircle(brush, w * 0.13f, Offset(stemX, w * 0.72f), style = stroke)
+        drawCircle(brush, w * 0.05f, Offset(stemX, w * 0.72f))
+        sparkle(Offset(w * 0.82f, w * 0.18f), w * 0.09f, w * 0.02f, brush)
+    }
 
 // ───────────────────────── Silky spring interaction ─────────────────────────
 

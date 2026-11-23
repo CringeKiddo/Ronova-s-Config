@@ -53,11 +53,14 @@ import androidx.compose.ui.window.Dialog
 import com.ronova.config.data.BluetoothIsolatorConfig
 import com.ronova.config.data.ConfigState
 import com.ronova.config.data.CutoutCrashGuardConfig
+import com.ronova.config.data.DisplayRefreshConfig
 import com.ronova.config.data.FramePacingConfig
 import com.ronova.config.data.FpsOverlayConfig
 import com.ronova.config.data.ModuleId
 import com.ronova.config.data.NetworkShieldConfig
 import com.ronova.config.data.RenderScalerConfig
+import com.ronova.config.data.ThermalGuardConfig
+import com.ronova.config.data.TouchLatencyConfig
 import com.ronova.config.data.isModuleEnabled
 import com.ronova.config.data.withModuleEnabled
 import com.ronova.config.ui.theme.LocalRonova
@@ -87,6 +90,9 @@ private fun moduleBlurb(id: ModuleId): String = when (id) {
     ModuleId.NETWORK_SHIELD -> "Wi-Fi lock, DNS and background traffic control"
     ModuleId.BLUETOOTH_ISOLATOR -> "Keeps gamepad traffic clear of Wi-Fi interference"
     ModuleId.FPS_OVERLAY -> "2-3 digit FPS readout straight from SurfaceFlinger"
+    ModuleId.TOUCH_LATENCY -> "Shorter long-press timeout, zero system animation delay"
+    ModuleId.DISPLAY_REFRESH -> "Keeps the panel off a low refresh mode the game never asked for"
+    ModuleId.THERMAL_GUARD -> "Warns before throttling hits, straight from PowerManager"
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -151,6 +157,15 @@ fun ConfigureSheet(
                         }
                         ModuleId.FPS_OVERLAY -> FpsSettings(config.fpsOverlay, on) {
                             onConfigChange(config.copy(fpsOverlay = it))
+                        }
+                        ModuleId.TOUCH_LATENCY -> TouchLatencySettings(config.touchLatency, on) {
+                            onConfigChange(config.copy(touchLatency = it))
+                        }
+                        ModuleId.DISPLAY_REFRESH -> DisplayRefreshSettings(config.displayRefresh, on) {
+                            onConfigChange(config.copy(displayRefresh = it))
+                        }
+                        ModuleId.THERMAL_GUARD -> ThermalGuardSettings(config.thermalGuard, on) {
+                            onConfigChange(config.copy(thermalGuard = it))
                         }
                     }
                 }
@@ -478,8 +493,20 @@ private fun ScalerSettings(cfg: RenderScalerConfig, enabled: Boolean, onChange: 
 @Composable
 private fun CutoutSettings(cfg: CutoutCrashGuardConfig, enabled: Boolean, onChange: (CutoutCrashGuardConfig) -> Unit) {
     SubToggle("Force cutout inset reset", cfg.forceResetCutout, enabled, { onChange(cfg.copy(forceResetCutout = it)) })
-    SubToggle("WebView and game LMKD protection", cfg.protectWebViewLmkd, enabled, { onChange(cfg.copy(protectWebViewLmkd = it)) })
-    SubToggle("Disable HW overlays", cfg.disableHwOverlays, enabled, { onChange(cfg.copy(disableHwOverlays = it)) })
+    SubToggle(
+        "Keep game in the active standby bucket",
+        cfg.keepTargetAppActive,
+        enabled,
+        { onChange(cfg.copy(keepTargetAppActive = it)) },
+        hint = "am set-standby-bucket (no root; replaces the old LMKD write)"
+    )
+    SubToggle(
+        "Disable phantom-process killer",
+        cfg.disablePhantomProcessKiller,
+        enabled,
+        { onChange(cfg.copy(disablePhantomProcessKiller = it)) },
+        hint = "Android 12+ kills background child/WebView processes above a low cap"
+    )
     SubToggle("Trim CMA memory", cfg.trimCmaMemory, enabled, { onChange(cfg.copy(trimCmaMemory = it)) })
 }
 
@@ -532,8 +559,12 @@ private fun NetworkSettings(cfg: NetworkShieldConfig, enabled: Boolean, onChange
 @Composable
 private fun BluetoothSettings(cfg: BluetoothIsolatorConfig, enabled: Boolean, onChange: (BluetoothIsolatorConfig) -> Unit) {
     SubToggle("Kill background BLE scans", cfg.killBleBackgroundScans, enabled, { onChange(cfg.copy(killBleBackgroundScans = it)) })
-    SubToggle("Boost Bluetooth daemon priority", cfg.boostBluetoothDaemonPriority, enabled, { onChange(cfg.copy(boostBluetoothDaemonPriority = it)) }, hint = "renice on com.android.bluetooth")
     SubToggle("2.4 GHz coexistence alert", cfg.warnOn24GhzCoexistence, enabled, { onChange(cfg.copy(warnOn24GhzCoexistence = it)) })
+    Text(
+        "Boosting the Bluetooth daemon's priority needed root and had no non-root equivalent, so it was removed.",
+        style = MaterialTheme.typography.bodySmall,
+        color = RonovaPalette.TextSecondary
+    )
 }
 
 @Composable
@@ -547,6 +578,62 @@ private fun FpsSettings(cfg: FpsOverlayConfig, enabled: Boolean, onChange: (FpsO
     )
     Text(
         "Off by default. The overlay is click-through and has no background box.",
+        style = MaterialTheme.typography.bodySmall,
+        color = RonovaPalette.TextSecondary
+    )
+}
+
+@Composable
+private fun TouchLatencySettings(cfg: TouchLatencyConfig, enabled: Boolean, onChange: (TouchLatencyConfig) -> Unit) {
+    SubToggle(
+        "Shorten long-press timeout",
+        cfg.reduceLongPressTimeout,
+        enabled,
+        { onChange(cfg.copy(reduceLongPressTimeout = it)) },
+        hint = "400ms -> 250ms before a touch registers as a long-press"
+    )
+    SubToggle(
+        "Zero system animation scales",
+        cfg.disableUiAnimations,
+        enabled,
+        { onChange(cfg.copy(disableUiAnimations = it)) },
+        hint = "Window, transition and animator duration scale -> 0"
+    )
+    Text(
+        "Affects system UI only (dialogs, app switches, the shade), not in-game rendering - there's no public, " +
+            "non-root hook into another app's touch pipeline.",
+        style = MaterialTheme.typography.bodySmall,
+        color = RonovaPalette.TextSecondary
+    )
+}
+
+@Composable
+private fun DisplayRefreshSettings(cfg: DisplayRefreshConfig, enabled: Boolean, onChange: (DisplayRefreshConfig) -> Unit) {
+    SubToggle(
+        "Force the refresh-rate floor up",
+        cfg.forceMaxRefreshRate,
+        enabled,
+        { onChange(cfg.copy(forceMaxRefreshRate = it)) },
+        hint = "Settings.System.min/peak_refresh_rate (Android 11+); the OS clamps to what the panel supports"
+    )
+    Text(
+        "Fixes games that never request a high refresh rate themselves and get stuck on the device's lowest mode.",
+        style = MaterialTheme.typography.bodySmall,
+        color = RonovaPalette.TextSecondary
+    )
+}
+
+@Composable
+private fun ThermalGuardSettings(cfg: ThermalGuardConfig, enabled: Boolean, onChange: (ThermalGuardConfig) -> Unit) {
+    SubToggle(
+        "Warn before severe throttling",
+        cfg.warnOnThrottling,
+        enabled,
+        { onChange(cfg.copy(warnOnThrottling = it)) },
+        hint = "PowerManager.getThermalHeadroom() in-process - no ADB, no root"
+    )
+    Text(
+        "Shows up in the notification text when the device is approaching or already in severe thermal throttling.",
         style = MaterialTheme.typography.bodySmall,
         color = RonovaPalette.TextSecondary
     )
